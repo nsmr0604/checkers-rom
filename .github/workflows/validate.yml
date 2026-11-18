@@ -1,0 +1,85 @@
+name: Validate
+
+# 軽量検証 workflow (AOSP ビルドはまだ載せない)
+# 目的: Actions 発火・permissions・rolling prerelease 添付・旧アセット掃除を
+#       GitHub-hosted runner で確認する (pawchive の debug-latest パターン踏襲)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'README.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workflow YAML
+        run: |
+          for f in .github/workflows/*.yml; do
+            npx --yes js-yaml "$f" > /dev/null
+            echo "YAML OK: $f"
+          done
+
+      - name: Show environment
+        run: |
+          echo "repo=${{ github.repository }}"
+          echo "sha=${{ github.sha }}"
+          echo "run=${{ github.run_number }}"
+          echo "ref=${{ github.ref }}"
+
+      - name: Generate validation artifact
+        run: |
+          mkdir -p out
+          cat > out/VALIDATION.txt <<EOF
+          checkers-rom validation build
+          repository: ${{ github.repository }}
+          sha: ${{ github.sha }}
+          run: ${{ github.run_number }}
+          generated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          EOF
+          cat out/VALIDATION.txt
+
+      - name: Publish to rolling prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="checkers-latest"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Existing prerelease $TAG found - uploading with --clobber"
+            gh release upload "$TAG" out/VALIDATION.txt --clobber
+          else
+            echo "Creating rolling prerelease $TAG"
+            gh release create "$TAG" out/VALIDATION.txt \
+              --prerelease \
+              --title "checkers-latest (rolling)" \
+              --notes "Rolling prerelease. Validation build from Actions only."
+          fi
+
+      - name: Cleanup old assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="checkers-latest"
+          # 現行 run のアセット名以外を削除 (pawchive の VER フィルタと同じ発想)
+          KEEP="VALIDATION.txt"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+            if [ "$name" != "$KEEP" ]; then
+              echo "Deleting stale asset: $name"
+              gh release delete-asset "$TAG" "$name" --yes
+            fi
+          done
